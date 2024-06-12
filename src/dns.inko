@@ -34,6 +34,8 @@ class pub DNSFlags {
 
   fn static get_rcode(flags: Int) -> Option[RCODE] {
     let code = flags & 0x000F
+    # TODO Do we want to parse up to Refused like other common parsers? Or do we want to support the [full RCODE list](https://www.iana.org/assignments/dns-parameters/dns-parameters.xhtml#dns-parameters-12)
+    # If we want to support the full list, it goes up to 0xFFFF, and the way we parse the code right now only goes up to 0xF
     match code {
       case 0 -> Option.Some(RCODE.NoError)
       case 1 -> Option.Some(RCODE.FormErr)
