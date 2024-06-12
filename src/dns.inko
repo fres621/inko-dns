@@ -1,0 +1,223 @@
+# Resolve an IP from a domain
+import std.net.ip(IpAddress)
+import std.net.socket(Type, Socket)
+import std.rand(Random)
+import dataview(Consumer, Reader, Writer)
+
+class pub enum RCODE {
+  case NoError
+  case FormErr
+  case ServFail
+  case NXDomain
+  case NotImp
+  case Refused
+  case YXDomain
+  case YXRRSet
+  case NXRRSet
+  case NotAuth
+  case NotZone
+  case DSOTYPENI
+  case BADVERS
+  # case BADSIG
+  case BADKEY
+  case BADTIME
+  case BADMODE
+  case BADNAME
+  case BADALG
+  case BADTRUNC
+  case BADCOOKIE
+}
+
+class pub DNSFlags {
+  # Could implement AA, QR, RA and so on but we only care about RCODE for now
+  let @rcode: Option[RCODE]
+
+  fn static get_rcode(flags: Int) -> Option[RCODE] {
+    let code = flags & 0x000F
+    match code {
+      case 0 -> Option.Some(RCODE.NoError)
+      case 1 -> Option.Some(RCODE.FormErr)
+      case 2 -> Option.Some(RCODE.ServFail)
+      case 3 -> Option.Some(RCODE.NXDomain)
+      case 4 -> Option.Some(RCODE.NotImp)
+      case 5 -> Option.Some(RCODE.Refused)
+      case 6 -> Option.Some(RCODE.YXDomain)
+      case 7 -> Option.Some(RCODE.YXRRSet)
+      case 8 -> Option.Some(RCODE.NXRRSet)
+      case 9 -> Option.Some(RCODE.NotAuth)
+      case 10 -> Option.Some(RCODE.NotZone)
+      case 11 -> Option.Some(RCODE.DSOTYPENI)
+      # 12-15 are reserved
+      case 16 -> Option.Some(RCODE.BADVERS)
+      # case 16 -> Option.Some(RCODE.BADSIG)
+      case 17 -> Option.Some(RCODE.BADKEY)
+      case 18 -> Option.Some(RCODE.BADTIME)
+      case 19 -> Option.Some(RCODE.BADMODE)
+      case 20 -> Option.Some(RCODE.BADNAME)
+      case 21 -> Option.Some(RCODE.BADALG)
+      case 22 -> Option.Some(RCODE.BADTRUNC)
+      case 23 -> Option.Some(RCODE.BADCOOKIE)
+      case _ -> Option.None
+    }
+  }
+
+  fn static from_raw(raw: Int) -> DNSFlags {
+    DNSFlags(get_rcode(raw))
+  }
+}
+
+class pub DNSResponse {
+  let @transaction_id: Int
+  let @flags: Int
+  let @questions: Int
+  let @answer_rrs: Int
+  let @authority_rrs: Int
+  let @additional_rrs: Int
+  # TODO implement other things
+  let @ttl: Int
+  let @address: IpAddress
+
+  fn pub get_flags -> DNSFlags {
+    DNSFlags.from_raw(@flags)
+  }
+
+  fn pub has_error? -> Bool {
+    let flags = self.get_flags
+    match flags.rcode {
+      case Some(NoError) -> false
+      case _ -> true
+    } 
+  }
+
+  fn static from_packet(packet: ByteArray) -> DNSResponse {
+    # [Documentation](https://www.iana.org/assignments/dns-parameters/dns-parameters.xhtml)
+    let reader = Consumer.new(Reader.new(packet))
+
+    let trans_id = reader.readShort
+    let flags = reader.readShort
+    let questions = reader.readShort
+    let answer_rrs = reader.readShort
+    let authority_rrs = reader.readShort
+    let additional_rrs = reader.readShort
+
+    let parts = []
+    let mut part_len = reader.readByte
+    while part_len > 0 {
+      let record = ByteArray.new
+      let mut i = 0
+      while (i := i + 1) < part_len {
+        record.push(reader.readByte)
+      }
+      parts.push(record.into_string)
+      part_len = reader.readByte
+    }
+    # Resource Record (RR) TYPE
+    let _rec_type = reader.readShort
+    # DNS CLASS
+    let _q_class = reader.readShort
+
+    # not sure what these are
+    reader.readShort
+    reader.readShort
+    reader.readShort
+
+    # Time-To-Live
+    let ttl = reader.readInt
+
+    let len = reader.readShort
+
+    let address_parts = ByteArray.new
+    len.times fn (i) {
+      address_parts.push(reader.readByte)
+    }
+
+    # For now we only support IPv4 :(
+    let parsed_ip = match len {
+      case 4 -> IpAddress.v4(address_parts.get(0), address_parts.get(1), address_parts.get(2), address_parts.get(3))
+      case _ -> IpAddress.v4(0, 0, 0, 0)
+    }
+
+    return DNSResponse(
+      trans_id,
+      flags,
+      questions,
+      answer_rrs,
+      authority_rrs,
+      additional_rrs,
+      ttl,
+      parsed_ip
+    )
+  }
+}
+
+# Class for resolving domains
+# 
+# @example
+# import dns(DNSResolver)
+# 
+# let ip = DNSResolver.new.resolve("www.google.com").address
+class pub DNSResolver {
+  # TODO add support for multiple nameservers?
+  let @nameserver: IpAddress
+
+  # Make a query packet from a hostname
+  fn pub static make_query_packet(hostname: String) -> ByteArray {
+    let mut packet = ByteArray.new
+    # TODO should Random.new only be called once when the class is created?
+    let trans_id = Random.new.int_between(0, 32767)
+    # New writer instance that will write into packet
+    let writer = Writer(packet)
+    # Transaction ID
+    writer.writeShort(trans_id)
+    # Flags
+    writer.writeShort(0x0100)
+    # Question count
+    writer.writeShort(0x0001)
+    # Answer RRs
+    writer.writeShort(0x0000)
+    # Authority RRs
+    writer.writeShort(0x0000)
+    # Additional RRs
+    writer.writeShort(0x0000)
+    
+    let parts = hostname.split(".")
+    parts.each fn (part) {
+      writer.writeByte(part.size)
+      part.to_byte_array.iter.each fn (char) {
+        writer.writeByte(char)
+      }
+    }
+
+    writer.writeByte(0)
+    # Type 1 = A
+    writer.writeShort(0x0001)
+    # Class 1 = IN
+    writer.writeShort(0x0001)
+
+    return packet
+  }
+
+  # Resolves a hostname
+  fn pub resolve(hostname: String) -> DNSResponse {
+    let packet = DNSResolver.make_query_packet(hostname)
+    let socket = Socket.ipv4(Type.DGRAM).get
+
+    socket.send_bytes_to(
+      bytes: packet,
+      ip: @nameserver,
+      port: 53
+    ).get
+
+    let bytes = ByteArray.new
+    socket.receive_from(bytes, size: 1024).get
+    # TODO verify the transaction ID is the same, and verify the address that sent the data is the same we asked
+    # until these checks are added there's a risk of vulnerability
+    return DNSResponse.from_packet(bytes)
+  }
+
+  fn pub static new -> DNSResolver {
+    # TODO read nameservers from resolv.conf
+    # [Conditional compilation](https://docs.inko-lang.org/manual/main/guides/conditional-compilation/) might be useful for this purpose
+    DNSResolver(IpAddress.v4(8, 8, 8, 8))
+  }
+}
