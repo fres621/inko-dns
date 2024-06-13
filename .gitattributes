@@ -1,2 +1,4 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+# Add syntax highlighting for inko files on GitHub
+*.inko linguist-language=Elixir
